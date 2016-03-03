@@ -1,11 +1,12 @@
 (ns cloverage.coverage
-  (:import [clojure.lang LineNumberingPushbackReader IObj]
+  (:import [clojure.lang Compiler LineNumberingPushbackReader IObj]
            [java.io File InputStreamReader]
            [java.lang Runtime])
   (:use [clojure.java.io :only [reader writer copy]]
         [clojure.tools.cli :only [cli]]
         [cloverage source instrument debug report dependency])
   (:require [clojure.set :as set]
+            [clojure.string :as str]
             [clojure.test :as test]
             [clojure.tools.logging :as log]
             [bultitude.core :as blt])
@@ -95,6 +96,7 @@
        ["-d" "--[no-]debug"
         "Output debugging information to stdout." :default false]
        ["--[no-]nop" "Instrument with noops." :default false]
+       ["--[no-]compile" "Compile instrumented namespaces."]
        ["-n" "--ns-regex"
         "Regex for instrumented namespaces (can be repeated)."
         :default  []
@@ -153,6 +155,7 @@
         summary?      (:summary opts)
         debug?        (:debug opts)
         nops?         (:nop opts)
+        compile?      (:compile opts)
         help?         (:help opts)
         add-test-nses (:extra-test-ns opts)
         ns-regexs     (map re-pattern (:ns-regex opts))
@@ -174,13 +177,26 @@
         (println "Loading namespaces: " (apply list namespaces))
         (println "Test namespaces: " test-nses)
         (doseq [namespace (in-dependency-order (map symbol namespaces))]
-          (binding [*instrumented-ns* namespace]
-            (if nops?
-              (instrument #'nop namespace)
-              (instrument #'track-coverage namespace)))
-          (println "Loaded " namespace " .")
-          ;; mark the ns as loaded
-          (mark-loaded namespace))
+          (let [instrumented (binding [*instrumented-ns* namespace]
+                               (if nops?
+                                 (instrument #'nop namespace)
+                                 (instrument #'track-coverage namespace)))]
+            (println "Loaded " namespace " .")
+            ;; mark the ns as loaded
+            (mark-loaded namespace)
+            (when compile?
+              (let [path (str (-> namespace
+                                  name
+                                  (str/replace #"-" "_")
+                                  (str/replace #"\." "/")
+                                  (str ".clj")))
+                    text (str "(require '[cloverage instrument coverage])"
+                              (pr-str instrumented))]
+                (println (format "Compiling instrumented %s (path %s)\nContent:\n%s"
+                                 namespace path text))
+                (Compiler/compile (->> text .getBytes reader)
+                                  path
+                                  (-> path (str/split #"/") last))))))
         (println "Instrumented namespaces.")
         (let [test-result (when-not (empty? test-nses)
                             (let [test-syms (map symbol test-nses)]
